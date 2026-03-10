@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mqtt_broker
+    ports:
+      - '1883:1883'
+      - '9001:9001'
+    volumes:
+      - ./src/broker/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: mqtt_redis
+    ports:
+      - '6379:6379'
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: mqtt_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  postgres_data:
