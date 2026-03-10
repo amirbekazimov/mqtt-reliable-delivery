@@ -34,40 +34,47 @@ def create_device(device_id: str):
 def simulate_temperature(device_id: str, count: int = 10, interval: float = 1.0):
     """Simulate a temperature sensor sending data"""
     client = create_device(device_id)
-    
+
+    broker_available = True
+
     try:
         client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
         client.loop_start()
-        
-        print(f"\n🌡️  Starting temperature simulation for {device_id}")
-        print(f"   Sending {count} messages every {interval}s\n")
-        
-        for i in range(count):
-            payload = {
-                "device_id": device_id,
-                "temperature": round(random.uniform(18.0, 35.0), 2),
-                "humidity": round(random.uniform(30.0, 80.0), 2),
-                "timestamp": time.time(),
-                "message_num": i + 1
-            }
-            
-            topic = f"sensors/{device_id}/temperature"
-            
-            # Publish to MQTT
-            result = client.publish(topic, json.dumps(payload), qos=1)
-            
-            # Also save to Redis queue
-            push_message(topic, payload)
-            
-            print(f"📡 [{i+1}/{count}] {device_id} → temp: {payload['temperature']}°C, humidity: {payload['humidity']}%")
-            
-            time.sleep(interval)
-        
-        print(f"\n✅ {device_id} finished sending {count} messages")
-        
     except Exception as e:
-        print(f"❌ Error: {e}")
-    finally:
+        print(f"⚠️  Broker unavailable: {e}")
+        broker_available = False
+
+    print(f"\n🌡️  Starting temperature simulation for {device_id}")
+    print(f"   Sending {count} messages every {interval}s\n")
+
+    for i in range(count):
+        payload = {
+            "device_id": device_id,
+            "temperature": round(random.uniform(18.0, 35.0), 2),
+            "humidity": round(random.uniform(30.0, 80.0), 2),
+            "timestamp": time.time(),
+            "message_num": i + 1
+        }
+
+        topic = f"sensors/{device_id}/temperature"
+
+        # Always save to Redis queue (offline buffer)
+        push_message(topic, payload)
+
+        if broker_available:
+            try:
+                client.publish(topic, json.dumps(payload), qos=1)
+                print(f"📡 [{i+1}/{count}] {device_id} → temp: {payload['temperature']}°C | SENT")
+            except Exception as e:
+                print(f"📦 [{i+1}/{count}] {device_id} → temp: {payload['temperature']}°C | BUFFERED (broker down)")
+        else:
+            print(f"📦 [{i+1}/{count}] {device_id} → temp: {payload['temperature']}°C | BUFFERED (broker offline)")
+
+        time.sleep(interval)
+
+    print(f"\n✅ {device_id} finished")
+
+    if broker_available:
         client.loop_stop()
         client.disconnect()
 
