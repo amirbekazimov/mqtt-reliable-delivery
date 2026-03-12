@@ -4,6 +4,9 @@ import sys
 import os
 import time
 
+os.environ.setdefault("MQTT_QUEUE_KEY", "mqtt_queue_test")
+os.environ.setdefault("MQTT_QUEUE_PROCESSING_KEY", "mqtt_queue_test_processing")
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'storage'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'publisher'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src', 'subscriber'))

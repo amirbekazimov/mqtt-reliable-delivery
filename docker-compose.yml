@@ -1,24 +1,32 @@
-version: '3.8'
-
 services:
   mosquitto:
     image: eclipse-mosquitto:2.0
     container_name: mqtt_broker
     ports:
-      - '1883:1883'
-      - '9001:9001'
+      - "1883:1883"
+      - "9001:9001"
     volumes:
       - ./src/broker/mosquitto.conf:/mosquitto/config/mosquitto.conf
       - mosquitto_data:/mosquitto/data
       - mosquitto_log:/mosquitto/log
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-t", "health", "-m", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     container_name: mqtt_redis
     ports:
-      - '6379:6379'
+      - "6379:6379"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   postgres:
     image: postgres:15-alpine
@@ -28,10 +36,77 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - '5432:5432'
+      - "5433:5432"   # host 5433 so local Postgres can keep 5432
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  subscriber:
+    build: .
+    container_name: mqtt_subscriber
+    command: python3 -u src/subscriber/subscriber.py
+    environment:
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      MQTT_HOST: mosquitto
+    env_file: .env
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Single path: Redis buffer → MQTT broker (survives broker restarts)
+  redis_bridge:
+    build: .
+    container_name: mqtt_redis_bridge
+    command: python3 -u src/storage/redis_bridge.py
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_HOST: redis
+      MQTT_HOST: mosquitto
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  retry_worker:
+    build: .
+    container_name: mqtt_retry_worker
+    command: python3 -u src/storage/retry_worker.py
+    environment:
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      MQTT_HOST: mosquitto
+    env_file: .env
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: device simulator — pushes to Redis only (no MQTT/DB)
+  publisher:
+    build: .
+    container_name: mqtt_publisher
+    command: python3 -u src/publisher/publisher.py
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_HOST: redis
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   mosquitto_data:

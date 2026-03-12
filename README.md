@@ -1,103 +1,106 @@
 # MQTT Reliable Delivery
 
-> Guaranteed message delivery system for IoT devices using MQTT, Redis, and PostgreSQL.
+> Guaranteed message delivery for IoT: buffer → broker → persistence. Survives broker and subscriber restarts.
 
-## 🚨 Problem
+## Problem
 
 In standard MQTT, messages can be lost when:
 
-- Network connection drops between broker and subscriber
-- Subscriber is temporarily offline
-- Broker restarts unexpectedly
+- The broker is down or restarts
+- The subscriber is temporarily offline
+- The network drops between device and broker
 
-This project solves the **message loss problem** with a persistence layer and delivery tracking.
+This project solves the **message loss problem** with a single path: **Redis buffer → MQTT bridge → broker → subscriber → PostgreSQL**.
 
-## ✅ Solution
+## Solution
 
-- **Redis queue** buffers all incoming messages instantly
-- **PostgreSQL** tracks every message with delivery status
-- **Retry mechanism** handles failed deliveries (up to 5 attempts)
-- **Device stats** track each device's message history
+- **Devices / publisher** push only to a **Redis buffer** (no direct MQTT, no DB). Works when the device has no internet or the broker is down.
+- **Redis → MQTT bridge** is the single path to the broker: it drains the buffer and publishes to MQTT. When the broker restarts, the bridge reconnects and continues; nothing is lost.
+- **Subscriber** receives from MQTT and persists to **PostgreSQL** with delivery status.
+- **Retry worker** re-sends any undelivered messages from the DB (e.g. downstream failures).
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-IoT Devices (simulated)
+Devices / Gateway (or simulator)
       │
       ▼
-[MQTT Publisher] ──► [Mosquitto Broker] ──► [MQTT Subscriber]
-                                                    │
-                              ┌─────────────────────┤
-                              ▼                     ▼
-                         [Redis Queue]        [PostgreSQL]
-                         (buffer)             (persistence)
+   [Redis]  ← buffer (single write path from devices)
+      │
+      ▼
+[Redis Bridge]  →  [Mosquitto]  →  [Subscriber]  →  [PostgreSQL]
+ (drains buffer)     (broker)      (save + ack)      (persistence)
+                           │
+                           └── [Retry Worker]  (re-send undelivered from DB)
 ```
 
-## 🚀 Quick Start
+- **Publisher** (in repo): device simulator — pushes to Redis only. In production, replace with real devices or an HTTP ingest that writes to Redis.
+- **Redis bridge**: runs continuously; pops from Redis and publishes to MQTT. Survives broker restarts.
+- **Subscriber**: receives from MQTT, saves to DB, marks delivered.
+- **Retry worker**: periodically sends undelivered messages from DB to MQTT.
+
+## Quick Start
 
 ### Requirements
 
 - Docker & Docker Compose
-- Python 3.9+
+- Python 3.9+ (for local run and tests)
 
-### Run
+### Run with Docker
 
 ```bash
-# 1. Clone
-git clone https://github.com/yourusername/mqtt-reliable-delivery.git
+# 1. Clone and setup (replace YOUR_USERNAME with your GitHub username)
+git clone https://github.com/YOUR_USERNAME/mqtt-reliable-delivery.git
 cd mqtt-reliable-delivery
-
-# 2. Setup environment
 cp .env.example .env
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
 
-# 3. Start infrastructure
-docker-compose up -d
+# 2. Start everything (broker, Redis, Postgres, bridge, subscriber, retry worker)
+docker compose up -d
 
-# 4. Initialize database
-cd src/storage && python3 init_db.py && cd ../..
+# 3. Initialize database (once)
+docker compose exec subscriber python3 src/storage/database.py
 
-# 5. Start subscriber (Terminal 1)
-cd src/subscriber && python3 subscriber.py
+# 4. Run device simulator (pushes to Redis; bridge will send to MQTT)
+docker compose up publisher
 
-# 6. Start publisher (Terminal 2)
-cd src/publisher && python3 publisher.py
+# 5. Watch subscriber logs
+docker logs -f mqtt_subscriber
 ```
 
-## 📊 Output Example
+### Test “survives restart”
 
-```
-📨 Received [1] from device_001
-   Temp: 22.34°C | Humidity: 63.87%
-   ✅ Saved to DB (id=1)
+1. Start stack: `docker compose up -d` (run `python3 src/storage/database.py` once to init DB).
+2. Run publisher: `docker compose up publisher` (messages go to Redis).
+3. Stop broker: `docker stop mqtt_broker`.
+4. Run publisher again (messages keep going to Redis).
+5. Start broker: `docker start mqtt_broker`.
+6. Bridge reconnects and drains Redis → MQTT; subscriber receives and saves to DB.
 
-📨 Received [2] from device_002
-   Temp: 18.84°C | Humidity: 36.2%
-   ✅ Saved to DB (id=2)
-```
+## Output
 
-## 🧪 Tests
+On stop, bridge and subscriber print delivery stats (e.g. `confirmed=15 requeued=0`, `delivered=14 duplicate=1 failed=0`).
+
+## Tests
 
 ```bash
+# Start infra (broker, Redis, Postgres) then:
+cd src/storage && python3 database.py && cd ../..
 pytest tests/test_delivery.py -v
-# 10 passed in 1.23s
 ```
 
-## 🛠️ Tech Stack
+## Tech Stack
 
-| Technology       | Purpose              |
-| ---------------- | -------------------- |
-| Python           | Core language        |
-| MQTT / Mosquitto | Message broker       |
-| paho-mqtt        | Python MQTT client   |
-| Redis            | Message queue buffer |
-| PostgreSQL       | Message persistence  |
-| Docker Compose   | Infrastructure       |
-| pytest           | Testing              |
+| Technology       | Purpose                    |
+| ---------------- | -------------------------- |
+| Python           | Core language              |
+| MQTT / Mosquitto | Message broker             |
+| paho-mqtt        | Python MQTT client         |
+| Redis            | Message buffer (FIFO)      |
+| PostgreSQL       | Message persistence        |
+| Docker Compose   | Infrastructure             |
+| pytest           | Testing                    |
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 mqtt-reliable-delivery/
@@ -107,19 +110,26 @@ mqtt-reliable-delivery/
 │   ├── broker/
 │   │   └── mosquitto.conf
 │   ├── publisher/
-│   │   └── publisher.py      # IoT device simulator
+│   │   └── publisher.py       # Device simulator (Redis only)
 │   ├── subscriber/
-│   │   └── subscriber.py     # Message consumer
+│   │   └── subscriber.py      # MQTT → DB
 │   └── storage/
-│       ├── database.py       # PostgreSQL layer
-│       └── mqtt_queue.py     # Redis queue layer
+│       ├── database.py        # PostgreSQL
+│       ├── database.py        # PostgreSQL (+ run as script to init)
+│       ├── mqtt_queue.py      # Redis queue
+│       ├── redis_bridge.py    # Redis → MQTT
+│       └── retry_worker.py    # DB undelivered → MQTT
 └── tests/
-    └── test_delivery.py      # 10 tests
+    └── test_delivery.py
 ```
 
-## 💡 Use Cases
+## Use Cases
 
-- Smart home sensor networks
+- Smart home / sensor networks
 - Industrial IoT monitoring
-- Fleet tracking systems
-- Any IoT system where message loss is unacceptable
+- Fleet tracking
+- Any IoT system where message loss is unacceptable and devices may be offline or behind a gateway
+
+## License
+
+[MIT](LICENSE)
